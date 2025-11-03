@@ -30,8 +30,13 @@ import * as ReactDOM from 'react-dom';
 
 import { $createVariableNode } from './variable-node';
 
+import {
+  useFindAgentStructuredOutputLabel,
+  useShowSecondaryMenu,
+} from '@/pages/agent/hooks/use-build-structured-output';
 import { useBuildQueryVariableOptions } from '@/pages/agent/hooks/use-get-begin-query';
 import { PromptIdentity } from '../../agent-form/use-build-prompt-options';
+import { StructuredOutputSecondaryMenu } from '../structured-output-secondary-menu';
 import { ProgrammaticTag } from './constant';
 import './index.css';
 class VariableInnerOption extends MenuOption {
@@ -82,6 +87,8 @@ function VariablePickerMenuItem({
     option: VariableOption | VariableInnerOption,
   ) => void;
 }) {
+  const showSecondaryMenu = useShowSecondaryMenu();
+
   return (
     <li
       key={option.key}
@@ -93,15 +100,34 @@ function VariablePickerMenuItem({
       <div>
         <span className="text text-text-secondary">{option.title}</span>
         <ul className="pl-2 py-1">
-          {option.options.map((x) => (
-            <li
-              key={x.value}
-              onClick={() => selectOptionAndCleanUp(x)}
-              className="hover:bg-bg-card p-1 text-text-primary rounded-sm"
-            >
-              {x.label}
-            </li>
-          ))}
+          {option.options.map((x) => {
+            const shouldShowSecondary = showSecondaryMenu(x.value, x.label);
+
+            if (shouldShowSecondary) {
+              return (
+                <StructuredOutputSecondaryMenu
+                  key={x.value}
+                  data={x}
+                  click={(y) =>
+                    selectOptionAndCleanUp({
+                      ...x,
+                      ...y,
+                    } as VariableInnerOption)
+                  }
+                ></StructuredOutputSecondaryMenu>
+              );
+            }
+
+            return (
+              <li
+                key={x.value}
+                onClick={() => selectOptionAndCleanUp(x)}
+                className="hover:bg-bg-card p-1 text-text-primary rounded-sm"
+              >
+                {x.label}
+              </li>
+            );
+          })}
         </ul>
       </div>
     </li>
@@ -130,6 +156,8 @@ export default function VariablePickerMenuPlugin({
   baseOptions,
 }: VariablePickerMenuPluginProps): JSX.Element {
   const [editor] = useLexicalComposerContext();
+
+  const findAgentStructuredOutputLabel = useFindAgentStructuredOutputLabel();
 
   // const checkForTriggerMatch = useBasicTypeaheadTriggerMatch('/', {
   //   minLength: 0,
@@ -200,9 +228,18 @@ export default function VariablePickerMenuPlugin({
         return pre.concat(cur.options);
       }, []);
 
+      // agent structured output
+      const agentStructuredOutput = findAgentStructuredOutputLabel(
+        value,
+        children,
+      );
+      if (agentStructuredOutput) {
+        return agentStructuredOutput;
+      }
+
       return children.find((x) => x.value === value);
     },
-    [options],
+    [findAgentStructuredOutputLabel, options],
   );
 
   const onSelectOption = useCallback(

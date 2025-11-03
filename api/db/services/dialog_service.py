@@ -34,14 +34,14 @@ from api.db.services.knowledgebase_service import KnowledgebaseService
 from api.db.services.langfuse_service import TenantLangfuseService
 from api.db.services.llm_service import LLMBundle
 from api.db.services.tenant_llm_service import TenantLLMService
-from api.utils import current_timestamp, datetime_format
+from common.time_utils import current_timestamp, datetime_format
 from graphrag.general.mind_map_extractor import MindMapExtractor
 from rag.app.resume import forbidden_select_fields4resume
 from rag.app.tag import label_question
 from rag.nlp.search import index_name
 from rag.prompts.generator import chunks_format, citation_prompt, cross_languages, full_question, kb_prompt, keyword_extraction, message_fit_in, \
     gen_meta_filter, PROMPT_JINJA_ENV, ASK_SUMMARY
-from rag.utils import num_tokens_from_string
+from common.token_utils import num_tokens_from_string
 from rag.utils.tavily_conn import Tavily
 from common.string_utils import remove_redundant_spaces
 
