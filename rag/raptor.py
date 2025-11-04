@@ -41,6 +41,11 @@ class RecursiveAbstractiveProcessing4TreeOrganizedRetrieval:
         self._threshold = threshold
         self._prompt = prompt
         self._max_token = max_token
+        # Hierarchy metadata for summary chunks
+        # _summary_meta: {summary_idx: {"children": [idx,...], "layer": int, "parent": int|None}}
+        self._summary_meta = {}
+        # _layers: list of (start_idx, end_idx) ranges per layer, including layer 0 for leaves
+        self._layers = []
 
     @timeout(60*20)
     async def _chat(self, system, history, gen_conf):
@@ -88,6 +93,9 @@ class RecursiveAbstractiveProcessing4TreeOrganizedRetrieval:
 
     async def __call__(self, chunks, random_state, callback=None):
         if len(chunks) <= 1:
+            # No hierarchy to build, but keep layers info for downstream usage
+            self._layers = [(0, len(chunks))]
+            self._summary_meta = {}
             return []
         chunks = [(s, a) for s, a in chunks if s and len(a) > 0]
         layers = [(0, len(chunks))]
@@ -124,6 +132,15 @@ class RecursiveAbstractiveProcessing4TreeOrganizedRetrieval:
                 logging.debug(f"SUM: {cnt}")
                 embds = await self._embedding_encode(cnt)
                 chunks.append((cnt, embds))
+                # Record hierarchy metadata for this summary chunk
+                # New summary belongs to current layer index = len(layers)
+                new_idx = len(chunks) - 1
+                cur_layer = len(layers)
+                self._summary_meta[new_idx] = {"children": ck_idx, "layer": cur_layer, "parent": None}
+                # If children include previously created summary nodes, set their parent pointer
+                for ci in ck_idx:
+                    if ci in self._summary_meta:
+                        self._summary_meta[ci]["parent"] = new_idx
 
         labels = []
         while end - start > 1:
@@ -178,4 +195,16 @@ class RecursiveAbstractiveProcessing4TreeOrganizedRetrieval:
             start = end
             end = len(chunks)
 
+        # Persist layer ranges for downstream usage
+        self._layers = layers
         return chunks
+
+    def get_hierarchy(self):
+        """
+        Return hierarchy metadata built during summarization.
+        {
+          "layers": [(start,end), ...],
+          "summary_meta": {summary_idx: {"children": [...], "layer": int, "parent": int|None}}
+        }
+        """
+        return {"layers": self._layers, "summary_meta": self._summary_meta}

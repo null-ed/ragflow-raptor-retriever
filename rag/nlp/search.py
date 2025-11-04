@@ -450,6 +450,61 @@ class Dealer:
             if dnm not in ranks["doc_aggs"]:
                 ranks["doc_aggs"][dnm] = {"doc_id": did, "count": 0}
             ranks["doc_aggs"][dnm]["count"] += 1
+        # Append RAPTOR parent summaries related to selected leaf chunks
+        try:
+            if ranks["chunks"]:
+                leaf_ids_selected = [ck["chunk_id"] for ck in ranks["chunks"]]
+                idx_nms = [index_name(tid) for tid in tenant_ids] if isinstance(tenant_ids, list) else index_name(tenant_ids)
+                select_fields = [
+                    "content_ltks", "content_with_weight", "kb_id", "img_id",
+                    "docnm_kwd", "position_int", "doc_id", "page_num_int", "top_int",
+                    "create_timestamp_flt", "doc_type_kwd",
+                    "raptor_children_ids_kwd"
+                ]
+                # Only request vector field when a valid query vector exists
+                if dim > 0:
+                    select_fields.append(vector_column)
+                parent_limit = max(1, min(64, page_size))
+                es_res = self.dataStore.search(select_fields, [],
+                                               {"raptor_children_ids_kwd": leaf_ids_selected, "doc_type_kwd": "raptor_summary"},
+                                               [], OrderByExpr(), 0, parent_limit,
+                                               idx_nms, kb_ids)
+                parents = self.dataStore.getFields(es_res, select_fields + ["_score"]) or {}
+                child_sim_map = {ck["chunk_id"]: ck["similarity"] for ck in ranks["chunks"]}
+                parent_items = []
+                for pid, p in parents.items():
+                    matched_children = [cid for cid in p.get("raptor_children_ids_kwd", []) if cid in child_sim_map]
+                    if not matched_children:
+                        continue
+                    p_sim = float(np.sum([child_sim_map[cid] for cid in matched_children]))
+                    parent_items.append((pid, p, p_sim))
+                for pid, p, p_sim in sorted(parent_items, key=lambda x: x[2] * -1):
+                    if len(ranks["chunks"]) >= page_size:
+                        break
+                    dnm = p.get("docnm_kwd", "")
+                    did = p.get("doc_id", "")
+                    d = {
+                        "chunk_id": pid,
+                        "content_ltks": p.get("content_ltks", ""),
+                        "content_with_weight": p.get("content_with_weight", ""),
+                        "doc_id": did,
+                        "docnm_kwd": dnm,
+                        "kb_id": p.get("kb_id", ""),
+                        "important_kwd": p.get("important_kwd", []),
+                        "image_id": p.get("img_id", ""),
+                        "similarity": p_sim,
+                        "vector_similarity": p_sim,
+                        "term_similarity": p_sim,
+                        "vector": p.get(vector_column, zero_vector),
+                        "positions": p.get("position_int", []),
+                        "doc_type_kwd": p.get("doc_type_kwd", "")
+                    }
+                    ranks["chunks"].append(d)
+                    if dnm not in ranks["doc_aggs"]:
+                        ranks["doc_aggs"][dnm] = {"doc_id": did, "count": 0}
+                    ranks["doc_aggs"][dnm]["count"] += 1
+        except Exception:
+            logging.exception("Append RAPTOR parent summaries got exception")
         ranks["doc_aggs"] = [{"doc_name": k,
                               "doc_id": v["doc_id"],
                               "count": v["count"]} for k,

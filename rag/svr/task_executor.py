@@ -679,12 +679,15 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
     raptor_config = kb_parser_config.get("raptor", {})
 
     chunks = []
+    # Record leaf chunk ids aligned with input order for RAPTOR hierarchy mapping
+    leaf_ids = []
     vctr_nm = "q_%d_vec"%vector_size
     for doc_id in doc_ids:
         for d in settings.retriever.chunk_list(doc_id, row["tenant_id"], [str(row["kb_id"])],
                                                  fields=["content_with_weight", vctr_nm],
                                                  sort_by_position=True):
             chunks.append((d["content_with_weight"], np.array(d[vctr_nm])))
+            leaf_ids.append(d["id"])
 
     raptor = Raptor(
         raptor_config.get("max_cluster", 64),
@@ -696,6 +699,8 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
     )
     original_length = len(chunks)
     chunks = await raptor(chunks, kb_parser_config["raptor"]["random_seed"], callback)
+    hierarchy = raptor.get_hierarchy()
+    summary_meta = hierarchy.get("summary_meta", {})
     doc = {
         "doc_id": fake_doc_id,
         "kb_id": [str(row["kb_id"])],
@@ -706,15 +711,47 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
         doc[PAGERANK_FLD] = int(row["pagerank"])
     res = []
     tk_count = 0
-    for content, vctr in chunks[original_length:]:
+    sum_idx2id: dict[int, str] = {}
+    for i, (content, vctr) in enumerate(chunks[original_length:], start=original_length):
         d = copy.deepcopy(doc)
-        d["id"] = xxhash.xxh64((content + str(fake_doc_id)).encode("utf-8")).hexdigest()
+        s_id = xxhash.xxh64((content + str(fake_doc_id)).encode("utf-8")).hexdigest()
+        d["id"] = s_id
         d["create_time"] = str(datetime.now()).replace("T", " ")[:19]
         d["create_timestamp_flt"] = datetime.now().timestamp()
         d[vctr_nm] = vctr.tolist()
         d["content_with_weight"] = content
         d["content_ltks"] = rag_tokenizer.tokenize(content)
         d["content_sm_ltks"] = rag_tokenizer.fine_grained_tokenize(d["content_ltks"])
+        d["doc_type_kwd"] = "raptor_summary"
+        # RAPTOR hierarchy fields on summary chunks
+        meta = summary_meta.get(i, {})
+        if "layer" in meta:
+            d["raptor_level_int"] = int(meta["layer"])  # minimal summary layer = 1
+        children_ids = []
+        for ci in meta.get("children", []) or []:
+            if ci < original_length:
+                if 0 <= ci < len(leaf_ids):
+                    children_ids.append(leaf_ids[ci])
+            else:
+                c_id = sum_idx2id.get(ci)
+                if not c_id:
+                    try:
+                        c_txt = chunks[ci][0]
+                        c_id = xxhash.xxh64((c_txt + str(fake_doc_id)).encode("utf-8")).hexdigest()
+                    except Exception:
+                        c_id = None
+                if c_id:
+                    children_ids.append(c_id)
+        if children_ids:
+            d["raptor_children_ids_kwd"] = children_ids
+        parent_idx = meta.get("parent")
+        if isinstance(parent_idx, int):
+            try:
+                p_txt = chunks[parent_idx][0]
+                d["raptor_parent_id_kwd"] = xxhash.xxh64((p_txt + str(fake_doc_id)).encode("utf-8")).hexdigest()
+            except Exception:
+                pass
+        sum_idx2id[i] = s_id
         res.append(d)
         tk_count += num_tokens_from_string(content)
     return res, tk_count
