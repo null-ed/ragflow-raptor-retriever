@@ -88,10 +88,31 @@ class Dealer:
         offset, limit = pg * ps, ps
 
         src = req.get("fields",
-                      ["docnm_kwd", "content_ltks", "kb_id", "img_id", "title_tks", "important_kwd", "position_int",
-                       "doc_id", "page_num_int", "top_int", "create_timestamp_flt", "knowledge_graph_kwd",
-                       "question_kwd", "question_tks", "doc_type_kwd",
-                       "available_int", "content_with_weight", PAGERANK_FLD, TAG_FLD])
+                      [
+                          "docnm_kwd",
+                          "content_ltks",
+                          "kb_id",
+                          "img_id",
+                          "title_tks",
+                          "important_kwd",
+                          "position_int",
+                          "doc_id",
+                          "page_num_int",
+                          "top_int",
+                          "create_timestamp_flt",
+                          "knowledge_graph_kwd",
+                          "question_kwd",
+                          "question_tks",
+                          "doc_type_kwd",
+                          "available_int",
+                          "content_with_weight",
+                          PAGERANK_FLD,
+                          TAG_FLD,
+                          # RAPTOR hierarchy fields
+                          "raptor_level_int",
+                          "raptor_parent_id_kwd",
+                          "raptor_children_kwd",
+                      ])
         kwds = set([])
 
         qst = req.get("question", "")
@@ -358,7 +379,9 @@ class Dealer:
     def retrieval(self, question, embd_mdl, tenant_ids, kb_ids, page, page_size, similarity_threshold=0.2,
                   vector_similarity_weight=0.3, top=1024, doc_ids=None, aggs=True,
                   rerank_mdl=None, highlight=False,
-                  rank_feature: dict | None = {PAGERANK_FLD: 10}):
+                  rank_feature: dict | None = {PAGERANK_FLD: 10},
+                  raptor_parent_depth: int | None = None,
+                  raptor_parents_overflow: bool | None = None):
         ranks = {"total": 0, "chunks": [], "doc_aggs": {}}
         if not question:
             return ranks
@@ -374,7 +397,8 @@ class Dealer:
         if isinstance(tenant_ids, str):
             tenant_ids = tenant_ids.split(",")
 
-        sres = self.search(req, [index_name(tid) for tid in tenant_ids],
+        idx_nms = [index_name(tid) for tid in tenant_ids]
+        sres = self.search(req, idx_nms,
                            kb_ids, embd_mdl, highlight, rank_feature=rank_feature)
 
         if rerank_mdl and sres.total > 0:
@@ -402,6 +426,8 @@ class Dealer:
         sim = sim[begin : begin + page_size]
         sim_np = np.array(sim, dtype=np.float64)
         idx = np.argsort(sim_np * -1)
+        # raptor_parent_depth here controls parent APPENDING depth, not sorting
+        # Keep ranked order by similarity unless explicitly changed elsewhere
         dim = len(sres.query_vector)
         vector_column = f"q_{dim}_vec"
         zero_vector = [0.0] * dim
@@ -439,7 +465,11 @@ class Dealer:
                 "term_similarity": tsim[i],
                 "vector": chunk.get(vector_column, zero_vector),
                 "positions": position_int,
-                "doc_type_kwd": chunk.get("doc_type_kwd", "")
+                "doc_type_kwd": chunk.get("doc_type_kwd", ""),
+                # RAPTOR hierarchy metadata pass-through (optional)
+                "raptor_level_int": chunk.get("raptor_level_int"),
+                "raptor_parent_id_kwd": chunk.get("raptor_parent_id_kwd"),
+                "raptor_children_kwd": chunk.get("raptor_children_kwd", []),
             }
             if highlight and sres.highlight:
                 if id in sres.highlight:
@@ -455,7 +485,122 @@ class Dealer:
                               "count": v["count"]} for k,
                                                        v in sorted(ranks["doc_aggs"].items(),
                                                                    key=lambda x: x[1]["count"] * -1)]
-        ranks["chunks"] = ranks["chunks"][:page_size]
+        # Append missing RAPTOR parents according to depth setting
+        # Determine depth and overflow policy from request param first, then env fallback
+        depth_cfg = None
+        overflow_cfg = None
+        try:
+            if raptor_parent_depth is None:
+                depth_cfg = int(os.getenv("RAPTOR_PARENT_DEPTH", "0"))
+            else:
+                depth_cfg = int(raptor_parent_depth)
+        except Exception:
+            depth_cfg = 0
+        try:
+            if raptor_parents_overflow is None:
+                overflow_cfg = str(os.getenv("RAPTOR_PARENTS_OVERFLOW", "1")).lower() in ("1", "true", "yes")
+            else:
+                overflow_cfg = bool(raptor_parents_overflow)
+        except Exception:
+            overflow_cfg = True
+
+        if depth_cfg != 0:
+            existing_ids = {ck["chunk_id"] for ck in ranks["chunks"]}
+            sim_map = {ck["chunk_id"]: ck["similarity"] for ck in ranks["chunks"]}
+            parent_sim: dict[str, float] = {}
+            parent_docs_cache: dict[str, dict] = {}
+
+            def get_doc_safe(cid: str) -> dict | None:
+                # Try search result field first (child), otherwise fetch from store
+                doc = sres.field.get(cid)
+                if doc is not None:
+                    return doc
+                if cid in parent_docs_cache:
+                    return parent_docs_cache[cid]
+                try:
+                    pdoc = self.dataStore.get(cid, idx_nms, kb_ids)
+                except Exception:
+                    pdoc = None
+                if pdoc:
+                    parent_docs_cache[cid] = pdoc
+                return pdoc
+
+            def collect_parent_chain(child_id: str, max_depth: int) -> list[str]:
+                chain = []
+                seen = set()
+                depth = 0
+                current_id = child_id
+                current_doc = get_doc_safe(current_id)
+                while True:
+                    if not current_doc:
+                        break
+                    pid = current_doc.get("raptor_parent_id_kwd", "")
+                    if not pid or pid in seen:
+                        break
+                    chain.append(pid)
+                    seen.add(pid)
+                    depth += 1
+                    if max_depth >= 0 and depth >= max_depth:
+                        break
+                    current_id = pid
+                    current_doc = get_doc_safe(current_id)
+                return chain
+
+            # Accumulate parents up to N levels (or to root if -1)
+            for ck in ranks["chunks"]:
+                cid = ck["chunk_id"]
+                child_sim = float(ck.get("similarity", 0.0))
+                max_depth = depth_cfg if depth_cfg >= 0 else -1
+                chain = collect_parent_chain(cid, max_depth)
+                for pid in chain:
+                    # take max similarity among children referencing this parent
+                    parent_sim[pid] = max(parent_sim.get(pid, 0.0), child_sim)
+
+            # Build parent chunks, avoiding duplicates
+            parent_chunks = []
+            for pid, p_sim in parent_sim.items():
+                if pid in existing_ids:
+                    continue
+                pdoc = get_doc_safe(pid)
+                if not pdoc:
+                    continue
+                # Determine vector column
+                p_vector = [0.0] * dim
+                for k in pdoc.keys():
+                    if k.endswith("_vec"):
+                        p_vector = pdoc.get(k, p_vector)
+                        break
+                parent_chunks.append({
+                    "chunk_id": pid,
+                    "content_ltks": pdoc.get("content_ltks", []),
+                    "content_with_weight": pdoc.get("content_with_weight", ""),
+                    "doc_id": pdoc.get("doc_id", ""),
+                    "docnm_kwd": pdoc.get("docnm_kwd", ""),
+                    "kb_id": pdoc.get("kb_id", []),
+                    "important_kwd": pdoc.get("important_kwd", []),
+                    "image_id": pdoc.get("img_id", ""),
+                    "similarity": p_sim,
+                    "vector_similarity": p_sim,
+                    "term_similarity": p_sim,
+                    "vector": p_vector,
+                    "positions": pdoc.get("position_int", []),
+                    "doc_type_kwd": pdoc.get("doc_type_kwd", ""),
+                    "raptor_level_int": pdoc.get("raptor_level_int"),
+                    "raptor_parent_id_kwd": pdoc.get("raptor_parent_id_kwd"),
+                    "raptor_children_kwd": pdoc.get("raptor_children_kwd", []),
+                })
+
+            if parent_chunks:
+                augmented = ranks["chunks"] + parent_chunks
+                augmented = sorted(augmented, key=lambda x: float(x.get("similarity", 0.0)) * -1)
+                if overflow_cfg:
+                    ranks["chunks"] = augmented
+                else:
+                    ranks["chunks"] = augmented[:page_size]
+            else:
+                ranks["chunks"] = ranks["chunks"][:page_size]
+        else:
+            ranks["chunks"] = ranks["chunks"][:page_size]
 
         return ranks
 

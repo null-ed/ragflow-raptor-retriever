@@ -121,6 +121,15 @@ def retrieval(tenant_id):
     retrieval_setting = req.get("retrieval_setting", {})
     similarity_threshold = float(retrieval_setting.get("score_threshold", 0.0))
     top = int(retrieval_setting.get("top_k", 1024))
+    # Optional RAPTOR parent appending controls (either in retrieval_setting or top-level)
+    raptor_parent_depth = req.get("raptor_parent_depth", retrieval_setting.get("raptor_parent_depth"))
+    try:
+        raptor_parent_depth = int(raptor_parent_depth) if raptor_parent_depth is not None else None
+    except Exception:
+        raptor_parent_depth = None
+    raptor_parents_overflow = req.get("raptor_parents_overflow", retrieval_setting.get("raptor_parents_overflow"))
+    if raptor_parents_overflow is not None:
+        raptor_parents_overflow = str(raptor_parents_overflow).lower() in ("1", "true", "yes")
     metadata_condition = req.get("metadata_condition", {})
     metas = DocumentService.get_meta_by_kbs([kb_id])
 
@@ -149,7 +158,9 @@ def retrieval(tenant_id):
             vector_similarity_weight=0.3,
             top=top,
             doc_ids=doc_ids,
-            rank_feature=label_question(question, [kb])
+            rank_feature=label_question(question, [kb]),
+            raptor_parent_depth=raptor_parent_depth,
+            raptor_parents_overflow=raptor_parents_overflow,
         )
 
         if use_kg:

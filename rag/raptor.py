@@ -86,16 +86,16 @@ class RecursiveAbstractiveProcessing4TreeOrganizedRetrieval:
         optimal_clusters = n_clusters[np.argmin(bics)]
         return optimal_clusters
 
-    async def __call__(self, chunks, random_state, callback=None):
+    async def __call__(self, chunks, random_state, callback=None, return_trace: bool = False):
         if len(chunks) <= 1:
-            return []
+            return [] if not return_trace else ([], [])
         chunks = [(s, a) for s, a in chunks if s and len(a) > 0]
         layers = [(0, len(chunks))]
+        trace_layers = []  # each item: {"members": list[list[int]], "summaries": list[int]}
         start, end = 0, len(chunks)
 
         @timeout(60*20)
-        async def summarize(ck_idx: list[int]):
-            nonlocal chunks
+        async def summarize(ck_idx: list[int], cluster_id: int, summary_results: list):
             texts = [chunks[i][0] for i in ck_idx]
             len_per_chunk = int(
                 (self._llm_model.max_length - self._max_token) / len(texts)
@@ -123,13 +123,19 @@ class RecursiveAbstractiveProcessing4TreeOrganizedRetrieval:
                 )
                 logging.debug(f"SUM: {cnt}")
                 embds = await self._embedding_encode(cnt)
-                chunks.append((cnt, embds))
+                summary_results.append((cluster_id, cnt, embds))
 
         labels = []
         while end - start > 1:
             embeddings = [embd for _, embd in chunks[start:end]]
             if len(embeddings) == 2:
-                await summarize([start, start + 1])
+                summary_results = []
+                await summarize([start, start + 1], 0, summary_results)
+                # append summaries deterministically
+                members = [[start, start + 1]]
+                for _, cnt, embds in sorted(summary_results, key=lambda x: x[0]):
+                    chunks.append((cnt, embds))
+                summaries = list(range(end, len(chunks)))
                 if callback:
                     callback(
                         msg="Cluster one layer: {} -> {}".format(
@@ -138,6 +144,7 @@ class RecursiveAbstractiveProcessing4TreeOrganizedRetrieval:
                     )
                 labels.extend([0, 0])
                 layers.append((end, len(chunks)))
+                trace_layers.append({"members": members, "summaries": summaries})
                 start = end
                 end = len(chunks)
                 continue
@@ -158,17 +165,25 @@ class RecursiveAbstractiveProcessing4TreeOrganizedRetrieval:
                 lbls = [np.where(prob > self._threshold)[0] for prob in probs]
                 lbls = [lbl[0] if isinstance(lbl, np.ndarray) else lbl for lbl in lbls]
 
+            summary_results = []
+            members = []
             async with trio.open_nursery() as nursery:
                 for c in range(n_clusters):
                     ck_idx = [i + start for i in range(len(lbls)) if lbls[i] == c]
                     assert len(ck_idx) > 0
-                    nursery.start_soon(summarize, ck_idx)
+                    members.append(ck_idx)
+                    nursery.start_soon(summarize, ck_idx, c, summary_results)
 
             assert len(chunks) - end == n_clusters, "{} vs. {}".format(
                 len(chunks) - end, n_clusters
             )
             labels.extend(lbls)
+            # append summaries deterministically
+            for _, cnt, embds in sorted(summary_results, key=lambda x: x[0]):
+                chunks.append((cnt, embds))
             layers.append((end, len(chunks)))
+            summaries = list(range(end, len(chunks)))
+            trace_layers.append({"members": members, "summaries": summaries})
             if callback:
                 callback(
                     msg="Cluster one layer: {} -> {}".format(
@@ -178,4 +193,4 @@ class RecursiveAbstractiveProcessing4TreeOrganizedRetrieval:
             start = end
             end = len(chunks)
 
-        return chunks
+        return chunks if not return_trace else (chunks, trace_layers)

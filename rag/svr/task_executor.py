@@ -695,7 +695,16 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
         raptor_config["threshold"],
     )
     original_length = len(chunks)
-    chunks = await raptor(chunks, kb_parser_config["raptor"]["random_seed"], callback)
+    # Preserve leaf chunk ids for hierarchy mapping
+    leaf_ids = []
+    vctr_nm = "q_%d_vec" % vector_size
+    for doc_id in doc_ids:
+        for d in settings.retriever.chunk_list(doc_id, row["tenant_id"], [str(row["kb_id"])],
+                                               fields=["content_with_weight", vctr_nm],
+                                               sort_by_position=True):
+            leaf_ids.append(d["id"])  # id injected by chunk_list
+    # Run RAPTOR and get trace for hierarchy
+    chunks, trace_layers = await raptor(chunks, kb_parser_config["raptor"]["random_seed"], callback, return_trace=True)
     doc = {
         "doc_id": fake_doc_id,
         "kb_id": [str(row["kb_id"])],
@@ -706,9 +715,13 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
         doc[PAGERANK_FLD] = int(row["pagerank"])
     res = []
     tk_count = 0
-    for content, vctr in chunks[original_length:]:
+    summary_idx_to_id = {}
+    # Build summary docs and map indices to generated IDs
+    for i, (content, vctr) in enumerate(chunks[original_length:]):
+        sum_idx = original_length + i
         d = copy.deepcopy(doc)
         d["id"] = xxhash.xxh64((content + str(fake_doc_id)).encode("utf-8")).hexdigest()
+        summary_idx_to_id[sum_idx] = d["id"]
         d["create_time"] = str(datetime.now()).replace("T", " ")[:19]
         d["create_timestamp_flt"] = datetime.now().timestamp()
         d[vctr_nm] = vctr.tolist()
@@ -717,6 +730,53 @@ async def run_raptor_for_kb(row, kb_parser_config, chat_mdl, embd_mdl, vector_si
         d["content_sm_ltks"] = rag_tokenizer.fine_grained_tokenize(d["content_ltks"])
         res.append(d)
         tk_count += num_tokens_from_string(content)
+
+    # Attach RAPTOR hierarchy metadata to summaries and update leaves with parent pointers
+    try:
+        # For each layer, assign level and children, and backfill parent pointers
+        for lvl, layer in enumerate(trace_layers, start=1):
+            members = layer.get("members", [])
+            summaries = layer.get("summaries", [])
+            for group_children, sum_idx in zip(members, summaries):
+                parent_id = summary_idx_to_id.get(sum_idx, "")
+                child_ids = []
+                for c_idx in group_children:
+                    if c_idx < original_length:
+                        # Leaf child
+                        lid = leaf_ids[c_idx]
+                        child_ids.append(lid)
+                        # Update leaf with parent pointer and level 0
+                        try:
+                            await trio.to_thread.run_sync(
+                                lambda: settings.docStoreConn.update(
+                                    {"id": lid},
+                                    {"raptor_parent_id_kwd": parent_id, "raptor_level_int": 0},
+                                    search.index_name(row["tenant_id"]), row["kb_id"],
+                                )
+                            )
+                        except Exception:
+                            logging.exception(f"Failed to update leaf parent pointer for {lid}")
+                    else:
+                        # Summary child
+                        sid = summary_idx_to_id.get(c_idx, "")
+                        if sid:
+                            child_ids.append(sid)
+                            # Set parent pointer on summary doc (in res list)
+                            try:
+                                # Find the doc in res and set parent
+                                rpos = c_idx - original_length
+                                if 0 <= rpos < len(res):
+                                    res[rpos]["raptor_parent_id_kwd"] = parent_id
+                                    res[rpos]["raptor_level_int"] = lvl - 1
+                            except Exception:
+                                logging.exception(f"Failed to set parent for summary {sid}")
+                # Set metadata on parent summary doc
+                rpos_parent = sum_idx - original_length
+                if 0 <= rpos_parent < len(res):
+                    res[rpos_parent]["raptor_level_int"] = lvl
+                    res[rpos_parent]["raptor_children_kwd"] = child_ids
+    except Exception:
+        logging.exception("Error while attaching RAPTOR hierarchy metadata")
     return res, tk_count
 
 

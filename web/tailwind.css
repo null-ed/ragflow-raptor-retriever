@@ -243,10 +243,11 @@
 
 @layer base {
   * {
-    @apply border-border;
+    border-color: hsl(var(--border));
   }
   body {
-    @apply bg-bg-base text-text-primary;
+    background-color: var(--bg-base);
+    color: var(--text-primary);
     font-feature-settings:
       'rlig' 1,
       'calt' 1;

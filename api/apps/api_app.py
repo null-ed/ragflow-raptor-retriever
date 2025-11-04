@@ -869,6 +869,16 @@ def retrieval():
     vector_similarity_weight = float(req.get("vector_similarity_weight", 0.3))
     top = int(req.get("top_k", 1024))
     highlight = bool(req.get("highlight", False))
+    # Optional RAPTOR parent appending controls
+    raptor_parent_depth = req.get("raptor_parent_depth")
+    try:
+        raptor_parent_depth = int(raptor_parent_depth) if raptor_parent_depth is not None else None
+    except Exception:
+        raptor_parent_depth = None
+    raptor_parents_overflow = req.get("raptor_parents_overflow")
+    if raptor_parents_overflow is not None:
+        # Accept truthy strings or booleans
+        raptor_parents_overflow = str(raptor_parents_overflow).lower() in ("1", "true", "yes")
 
     try:
         kbs = KnowledgebaseService.get_by_ids(kb_ids)
@@ -885,10 +895,23 @@ def retrieval():
         if req.get("keyword", False):
             chat_mdl = LLMBundle(kbs[0].tenant_id, LLMType.CHAT)
             question += keyword_extraction(chat_mdl, question)
-        ranks = settings.retriever.retrieval(question, embd_mdl, kbs[0].tenant_id, kb_ids, page, size,
-                                               similarity_threshold, vector_similarity_weight, top,
-                                               doc_ids, rerank_mdl=rerank_mdl, highlight= highlight,
-                                               rank_feature=label_question(question, kbs))
+        ranks = settings.retriever.retrieval(
+            question,
+            embd_mdl,
+            kbs[0].tenant_id,
+            kb_ids,
+            page,
+            size,
+            similarity_threshold,
+            vector_similarity_weight,
+            top,
+            doc_ids,
+            rerank_mdl=rerank_mdl,
+            highlight=highlight,
+            rank_feature=label_question(question, kbs),
+            raptor_parent_depth=raptor_parent_depth,
+            raptor_parents_overflow=raptor_parents_overflow,
+        )
         for c in ranks["chunks"]:
             c.pop("vector", None)
         return get_json_result(data=ranks)

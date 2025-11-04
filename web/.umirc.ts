@@ -22,10 +22,7 @@ export default defineConfig({
   history: {
     type: 'browser',
   },
-  plugins: [
-    '@react-dev-inspector/umi4-plugin',
-    '@umijs/plugins/dist/tailwindcss',
-  ],
+  plugins: ['@react-dev-inspector/umi4-plugin'],
   jsMinifier: 'none', // Fixed the issue that the page displayed an error after packaging lexical with terser
   lessLoader: {
     modifyVars: {
@@ -71,5 +68,5 @@ export default defineConfig({
 
     return memo;
   },
-  tailwindcss: {},
+  // tailwindcss: {},
 });

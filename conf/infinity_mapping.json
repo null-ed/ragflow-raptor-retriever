@@ -39,5 +39,8 @@
 	"n_hop_with_weight": {"type": "varchar", "default": ""},
 	"removed_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"},
 	"doc_type_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"},
-	"toc_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"}
+	"toc_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"},
+	"raptor_level_int": {"type": "integer", "default": 0},
+	"raptor_parent_id_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"},
+	"raptor_children_kwd": {"type": "varchar", "default": "", "analyzer": "whitespace-#"}
 }
